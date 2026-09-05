@@ -452,12 +452,26 @@ impl<const COEFFICIENT_COUNT: usize, T: Numeric> Polynomial<COEFFICIENT_COUNT, T
             // turned around.
             let previous = chain.get(length - 2).copied().unwrap_or_default();
             let current = chain.get(length - 1).copied().unwrap_or_default();
-            let Some(next) = remainder(&previous, &current) else {
+            let Some(mut next) = remainder(&previous, &current) else {
                 break;
             };
             // Nothing left over means the chain is finished.
             if next.is_zero() {
                 break;
+            }
+            // With no rescaling the coefficients grow or shrink geometrically down the chain,
+            // overflowing to infinity in f32 (and underflowing to zero in both precisions) by
+            // around degree ten. Only the signs are ever read back out of the chain, so
+            // renormalizing each entry to unit max-norm as it is built removes the failure without
+            // changing a single sign.
+            let max_norm = next
+                .coefficients()
+                .iter()
+                .fold(T::ZERO, |largest, coefficient| {
+                    largest.max(coefficient.abs())
+                });
+            if max_norm.is_finite() && max_norm != T::ZERO {
+                next = next / max_norm;
             }
             if let Some(slot) = chain.get_mut(length) {
                 *slot = -next;
