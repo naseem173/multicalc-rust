@@ -3,13 +3,34 @@
 
 use multicalc::error::PolynomialError;
 use multicalc::polynomial::Polynomial;
-use multicalc::scalar::Dual;
+use multicalc::scalar::{Dual, Numeric};
 
 /// x(x - 1)(x - 2)(x - 4), whose roots are 0, 1, 2 and 4.
 const QUARTIC_FOUR_ROOTS: [f64; 5] = [0.0, -8.0, 14.0, -7.0, 1.0];
 
 /// (x - 2)²(x + 1), which has a doubled root at 2 and a single one at -1.
 const CUBIC_REPEATED: [f64; 4] = [4.0, 0.0, -3.0, 1.0];
+/// A degree-12 polynomial with twelve distinct real roots: -50, -30, -30.0001, -20, -10,
+/// -10.0001, 10, 10.0001, 20, 30, 30.0001 and 50. Four of them sit in close pairs 0.0001 apart, so
+/// the root-counting chain built from this polynomial needs several divisions between nearly
+/// proportional polynomials, which is exactly where an unnormalized chain's coefficients drift
+/// hardest. In `f32` that drift used to run entries out of range partway through the chain,
+/// silently miscounting the roots.
+const DEGREE_TWELVE_CLOSE_PAIRS: [f64; 13] = [
+    8_099_999_999_100_000.0,
+    17_999_999_999.64,
+    -203_489_999_981_990.0,
+    -288_199_999.994_956,
+    1_710_099_999_884.44,
+    1_302_399.999_984_04,
+    -5_601_999_999.721_6,
+    -2_375.999_999_984_4,
+    7_979_999.999_756,
+    1.759_999_999_996,
+    -4_899.999_999_94,
+    -0.0004,
+    1.0,
+];
 
 fn assert_close(found: &[f64], expected: &[f64], tolerance: f64) {
     assert_eq!(found.len(), expected.len());
@@ -320,5 +341,27 @@ fn real_roots_in_rejects_bad_arguments() {
             .unwrap()
             .len(),
         4
+);
+}
+
+fn assert_counts_a_degree_twelve_polynomial<T: Numeric>() {
+    let coefficients = DEGREE_TWELVE_CLOSE_PAIRS.map(T::from_f64);
+    let poly: Polynomial<13, T> = Polynomial::new(coefficients);
+    let bound = T::from_f64(60.0);
+
+    assert_eq!(
+        poly.count_real_roots(-bound, bound).unwrap(),
+        12,
+        "the root-counting chain should not lose roots to overflow or underflow by this degree"
     );
+}
+
+#[test]
+fn count_real_roots_survives_high_degree_f32() {
+    assert_counts_a_degree_twelve_polynomial::<f32>();
+}
+
+#[test]
+fn count_real_roots_survives_high_degree_f64() {
+    assert_counts_a_degree_twelve_polynomial::<f64>();
 }
