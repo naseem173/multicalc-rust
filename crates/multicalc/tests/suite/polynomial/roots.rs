@@ -341,7 +341,7 @@ fn real_roots_in_rejects_bad_arguments() {
             .unwrap()
             .len(),
         4
-);
+        );
 }
 
 fn assert_counts_a_degree_twelve_polynomial<T: Numeric>() {
