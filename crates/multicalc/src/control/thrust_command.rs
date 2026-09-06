@@ -17,6 +17,7 @@ use crate::spatial::SO3;
 pub struct ThrustCommand<T: Numeric = f64> {
     attitude: SO3<T>,
     thrust_acceleration: T,
+    tilt_bound: bool,
 }
 
 impl<T: Numeric> ThrustCommand<T> {
@@ -39,6 +40,19 @@ impl<T: Numeric> ThrustCommand<T> {
     #[must_use]
     pub fn thrust_force(&self, mass: T) -> T {
         self.thrust_acceleration * mass
+    }
+
+    /// `true` when the attitude asks for less tilt than the wanted acceleration would otherwise
+    /// need, because
+    /// [`thrust_command_from_acceleration_with_tilt_limit`] capped it at its `max_tilt` and scaled
+    /// the sideways part of the push down to fit, keeping the vertical part unchanged.
+    ///
+    /// A command built by [`thrust_command_from_acceleration`], which has no tilt limit to hit, is
+    /// never bound.
+    #[inline]
+    #[must_use]
+    pub fn tilt_bound(&self) -> bool {
+        self.tilt_bound
     }
 }
 
@@ -96,6 +110,108 @@ pub fn thrust_command_from_acceleration<T: Numeric>(
     // Gravity pulls the body down the whole time, so the rotors cover that as well as whatever
     // acceleration is being asked for.
     let push = acceleration_command + Vector::new([T::ZERO, T::ZERO, gravity]);
+    thrust_command_from_push(push, desired_heading, false)
+}
+
+/// Works out how to point a flying body, and how hard to push, to get a wanted acceleration —
+/// the same as [`thrust_command_from_acceleration`], but with the tilt capped.
+///
+/// A position loop with a distant setpoint, or one that has wound up, can ask for a lateral
+/// acceleration large enough to tip the body past where its vertical thrust still holds it up, so
+/// it descends while accelerating sideways instead of climbing or holding height. `max_tilt` caps
+/// how far from level the attitude is allowed to lean, as an angle in `(0, π/2)` radians measured
+/// from the world's +z axis. When the wanted acceleration would tip the body past that, the
+/// sideways part of the push is scaled down to fit the cap while the vertical part — and so the
+/// climb or descent it commands — is left exactly as it was; [`ThrustCommand::tilt_bound`] then
+/// reports `true`. A wanted acceleration already inside the cap comes back unchanged, same as
+/// [`thrust_command_from_acceleration`] would give it, with [`ThrustCommand::tilt_bound`]
+/// reporting `false`.
+///
+/// Returns [`ControlError::NonFinite`] if any argument, including `max_tilt`, is not finite,
+/// [`ControlError::InvalidTiltLimit`] if `max_tilt` is not strictly positive or reaches a quarter
+/// turn (π/2) or beyond, [`ControlError::UndefinedThrustDirection`] if the wanted acceleration
+/// cancels gravity exactly, leaving no direction to push in, or
+/// [`ControlError::UndefinedHeadingDirection`] if the push would be straight along the wanted
+/// heading, which leaves the heading with nothing to set it by.
+///
+/// ```
+/// use multicalc::control::thrust_command_from_acceleration_with_tilt_limit;
+/// use multicalc::linear_algebra::Vector;
+///
+/// let gravity = 9.81_f64;
+/// let facing_along_x = 0.0;
+/// let max_tilt = 0.5; // a bit under a third of a turn
+///
+/// // A modest sideways request stays inside the cap and comes back unbound.
+/// let modest = thrust_command_from_acceleration_with_tilt_limit(
+///     Vector::new([1.0, 0.0, 0.0]),
+///     facing_along_x,
+///     gravity,
+///     max_tilt,
+/// )
+/// .unwrap();
+/// assert!(!modest.tilt_bound());
+///
+/// // A far larger sideways request is capped at max_tilt, and says so.
+/// let huge = thrust_command_from_acceleration_with_tilt_limit(
+///     Vector::new([50.0, 0.0, 0.0]),
+///     facing_along_x,
+///     gravity,
+///     max_tilt,
+/// )
+/// .unwrap();
+/// assert!(huge.tilt_bound());
+/// let up_axis = huge.attitude().act(Vector::new([0.0, 0.0, 1.0]));
+/// assert!((up_axis[2].acos() - max_tilt).abs() < 1e-9);
+///
+/// // The vertical part of the push — what holds the body up — is left untouched by the cap.
+/// assert!((huge.thrust_acceleration() * up_axis[2] - gravity).abs() < 1e-9);
+/// ```
+pub fn thrust_command_from_acceleration_with_tilt_limit<T: Numeric>(
+    acceleration_command: Vector3D<T>,
+    desired_heading: T,
+    gravity: T,
+    max_tilt: T,
+) -> Result<ThrustCommand<T>, ControlError> {
+    if !acceleration_command.is_finite()
+        || !desired_heading.is_finite()
+        || !gravity.is_finite()
+        || !max_tilt.is_finite()
+    {
+        return Err(ControlError::NonFinite);
+    }
+    let quarter_turn = T::PI * T::HALF;
+    if max_tilt <= T::ZERO || max_tilt >= quarter_turn {
+        return Err(ControlError::InvalidTiltLimit);
+    }
+
+    let push = acceleration_command + Vector::new([T::ZERO, T::ZERO, gravity]);
+    let vertical = push[2];
+    let horizontal = Vector::new([push[0], push[1], T::ZERO]).norm();
+
+    // Only a push that still points somewhat upward has a tilt worth capping this way: leaning the
+    // body over trades vertical thrust for horizontal, so past level there is no vertical part left
+    // to hold the cap against.
+    let mut tilt_bound = false;
+    let push = if vertical > T::ZERO && horizontal.atan2(vertical) > max_tilt {
+        tilt_bound = true;
+        let horizontal_limit = vertical * max_tilt.tan();
+        let scale = horizontal_limit / horizontal;
+        Vector::new([push[0] * scale, push[1] * scale, vertical])
+    } else {
+        push
+    };
+
+    thrust_command_from_push(push, desired_heading, tilt_bound)
+}
+
+/// Shared tail of both entry points: turns an already-settled push (gravity accounted for, and
+/// tilt-capped if that was asked for) into the attitude and thrust that produce it.
+fn thrust_command_from_push<T: Numeric>(
+    push: Vector3D<T>,
+    desired_heading: T,
+    tilt_bound: bool,
+) -> Result<ThrustCommand<T>, ControlError> {
     let thrust_acceleration = push.norm();
     let up_axis = push
         .try_normalized()
@@ -123,5 +239,6 @@ pub fn thrust_command_from_acceleration<T: Numeric>(
     Ok(ThrustCommand {
         attitude,
         thrust_acceleration,
+        tilt_bound,
     })
 }
